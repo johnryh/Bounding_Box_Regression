@@ -99,7 +99,29 @@ def conv2d(input_vol, num_kernal, scope, kernal_size=3, stride=1, activation='le
 
 
 def IoU(logits, label):
-    pass
+    '''
+
+    :param logits: [x_offset, y_offset, curr_w, curr_h]
+
+    :param label:
+    :return:
+    '''
+
+    logits *= img_h
+    label *= img_h
+
+    x_a = tf.maximum(logits[:, 0], label[:, 0])
+    y_a = tf.maximum(logits[:, 1], label[:, 1])
+    x_b = tf.minimum(logits[:, 0]+logits[:, 2], label[:, 0]+label[:, 2])
+    y_b = tf.minimum(logits[:, 1]+logits[:, 2], label[:, 1]+label[:, 3])
+
+    intersection = (x_b - x_a + 0.1) * (y_b - y_a + 0.1)
+    area_logit = logits[:, 2]*logits[:, 3]
+    area_label = label[:, 2]*label[:, 3]
+
+    iou = intersection/(area_logit + area_label - intersection)
+
+    return iou
 
 
 class BB_Regressor():
@@ -121,7 +143,7 @@ class BB_Regressor():
         img_split = tf.split(img, num_gpus, name='img_split') if num_gpus > 1 else [img]
         label_split = tf.split(label, num_gpus, name='label_split') if num_gpus > 1 else [label]
 
-        tower_score=[]; tower_loss=[]; tower_grads = [];
+        tower_score=[]; tower_loss=[]; tower_grads = []; tower_iou = []
         for gpu_id in range(num_gpus):
             with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_id)):
                 with tf.variable_scope('Regressor') as GAN_scope:
@@ -140,6 +162,7 @@ class BB_Regressor():
                     loss = tf.reduce_mean(tf.square((logits - label_split[gpu_id])))
                     tower_loss.append(loss)
                     tower_score.append(logits)
+                    tower_iou.append(IoU(logits, label_split[gpu_id]))
 
                 with tf.variable_scope('Compute_Optim_Gradients'):
                     tower_grads.append(self.optim.compute_gradients(loss))
@@ -149,7 +172,9 @@ class BB_Regressor():
         with tf.variable_scope('Sync_Point'):
             self.loss = tf.reduce_mean(tower_loss, axis=0, name='loss')
             self.logits = tf.concat(tower_score, axis=0)
+            self.IoU = tf.reduce_mean(tf.concat(tower_iou, axis=0), name='IoU')
             tf.summary.scalar('loss', self.loss)
+            tf.summary.scalar('IoU', self.IoU)
 
         with tf.variable_scope('GAN_Solver'):
             with tf.variable_scope('Apply_Optim_Gradients'), tf.device("/device:{}:1".format(controller)):
